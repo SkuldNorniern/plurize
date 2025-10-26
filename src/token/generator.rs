@@ -4,6 +4,42 @@ use crate::trie::Trie;
 use super::types::{TokenDefinition, TokenCategory, TokenType};
 use std::collections::HashMap;
 
+/// Options that control literal recognition behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiteralOptions {
+    /// Enable recognition of integer literals (e.g., 42, -10)
+    pub enable_integer: bool,
+    /// Enable recognition of floating-point literals (e.g., 3.14, -0.5)
+    pub enable_float: bool,
+    /// Allow scientific notation for float literals (e.g., 1e5, 2.5e-3)
+    pub allow_scientific: bool,
+    /// Enable recognition of string literals
+    pub enable_string: bool,
+    /// Delimiter to use for strings (default: '"')
+    pub string_delimiter: char,
+    /// Whether escape sequences like \" and \\ are recognized in strings
+    pub allow_string_escape: bool,
+    /// Enable recognition of character literals (e.g., 'a', '\n')
+    pub enable_character: bool,
+    /// Whether character escape sequences are recognized
+    pub char_allow_escape: bool,
+}
+
+impl Default for LiteralOptions {
+    fn default() -> Self {
+        Self {
+            enable_integer: true,
+            enable_float: true,
+            allow_scientific: true,
+            enable_string: true,
+            string_delimiter: '"',
+            allow_string_escape: true,
+            enable_character: false,
+            char_allow_escape: true,
+        }
+    }
+}
+
 /// Generator for creating lexers from token definitions.
 ///
 /// This struct provides a builder pattern for configuring and generating
@@ -14,6 +50,8 @@ pub struct TokenGenerator {
     longest_match: bool,
     /// Whether to prefer operators over keywords when they share prefixes
     prefer_operators: bool,
+    /// Literal options for generated tokenizers
+    literal_options: LiteralOptions,
 }
 
 impl TokenGenerator {
@@ -37,6 +75,52 @@ impl TokenGenerator {
         self
     }
 
+    /// Sets literal recognition options.
+    pub fn with_literal_options(mut self, options: LiteralOptions) -> Self {
+        self.literal_options = options;
+        self
+    }
+
+    pub fn enable_integer_literals(mut self, enabled: bool) -> Self {
+        self.literal_options.enable_integer = enabled;
+        self
+    }
+
+    pub fn enable_float_literals(mut self, enabled: bool) -> Self {
+        self.literal_options.enable_float = enabled;
+        self
+    }
+
+    pub fn allow_scientific_notation(mut self, enabled: bool) -> Self {
+        self.literal_options.allow_scientific = enabled;
+        self
+    }
+
+    pub fn enable_string_literals(mut self, enabled: bool) -> Self {
+        self.literal_options.enable_string = enabled;
+        self
+    }
+
+    pub fn with_string_delimiter(mut self, delimiter: char) -> Self {
+        self.literal_options.string_delimiter = delimiter;
+        self
+    }
+
+    pub fn allow_string_escape_sequences(mut self, enabled: bool) -> Self {
+        self.literal_options.allow_string_escape = enabled;
+        self
+    }
+
+    pub fn enable_character_literals(mut self, enabled: bool) -> Self {
+        self.literal_options.enable_character = enabled;
+        self
+    }
+
+    pub fn allow_char_escape_sequences(mut self, enabled: bool) -> Self {
+        self.literal_options.char_allow_escape = enabled;
+        self
+    }
+
     /// Generates a tokenizer from a collection of token definitions.
     ///
     /// # Arguments
@@ -50,6 +134,7 @@ impl TokenGenerator {
             category_tries: HashMap::new(),
             longest_match: self.longest_match,
             prefer_operators: self.prefer_operators,
+            literal_options: self.literal_options,
         };
 
         for token in tokens {
@@ -102,6 +187,7 @@ pub struct Tokenizer {
     category_tries: HashMap<TokenCategory, Trie<TokenType>>,
     longest_match: bool,
     prefer_operators: bool,
+    literal_options: LiteralOptions,
 }
 
 impl Tokenizer {
@@ -112,6 +198,7 @@ impl Tokenizer {
             category_tries: HashMap::new(),
             longest_match: true,
             prefer_operators: false,
+            literal_options: LiteralOptions::default(),
         }
     }
 
@@ -174,14 +261,25 @@ impl Tokenizer {
 
         let remaining = &text[start..];
 
-        // Try to match numbers first
-        if let Some((end, literal_type)) = self.match_number_literal(remaining) {
-            return Some((start + end, literal_type));
+        // Try to match numbers first if enabled
+        if (self.literal_options.enable_integer || self.literal_options.enable_float) {
+            if let Some((end, literal_type)) = self.match_number_literal(remaining) {
+                return Some((start + end, literal_type));
+            }
         }
 
-        // Try to match string literals
-        if let Some((end, literal_type)) = self.match_string_literal(remaining) {
-            return Some((start + end, literal_type));
+        // Try to match string literals if enabled
+        if self.literal_options.enable_string {
+            if let Some((end, literal_type)) = self.match_string_literal(remaining) {
+                return Some((start + end, literal_type));
+            }
+        }
+
+        // Try to match character literals if enabled
+        if self.literal_options.enable_character {
+            if let Some((end, literal_type)) = self.match_char_literal(remaining) {
+                return Some((start + end, literal_type));
+            }
         }
 
         None
@@ -207,7 +305,7 @@ impl Tokenizer {
                 '-' if i == 0 => {
                     end = i + 1;
                 }
-                '.' if !has_dot && i > 0 && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() => {
+                '.' if self.literal_options.enable_float && !has_dot && i > 0 && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() => {
                     has_dot = true;
                     let mut decimal_end = i + 2;
                     // Consume remaining digits after decimal
@@ -216,7 +314,7 @@ impl Tokenizer {
                     }
                     end = decimal_end;
                 }
-                'e' | 'E' if !has_exp && i > 0 && i + 1 < chars.len() => {
+                'e' | 'E' if self.literal_options.enable_float && self.literal_options.allow_scientific && !has_exp && i > 0 && i + 1 < chars.len() => {
                     has_exp = true;
                     // Handle optional sign and digits
                     let mut exp_pos = i + 1;
@@ -240,42 +338,86 @@ impl Tokenizer {
             }
         }
 
-        if end > 0 {
-            // Determine if it's a float or integer
-            let literal_type = if has_dot || has_exp { "LITERAL_FLOAT" } else { "LITERAL_INTEGER" };
-            Some((end, literal_type))
-        } else {
-            None
-        }
-    }
-
-    /// Attempts to match string literals (double-quoted strings).
-    fn match_string_literal(&self, text: &str) -> Option<(usize, &'static str)> {
-        let chars: Vec<char> = text.chars().collect();
-
-        if chars.is_empty() || chars[0] != '"' {
+        if end == 0 {
             return None;
         }
 
+        // Determine if it's a float or integer, respecting enabled options
+        let is_float = has_dot || has_exp;
+        if is_float {
+            if self.literal_options.enable_float {
+                Some((end, "LITERAL_FLOAT"))
+            } else if self.literal_options.enable_integer {
+                // Fallback to the longest integer prefix
+                let mut int_end = 0usize;
+                for (i, ch) in text.char_indices() {
+                    match ch {
+                        '-' if i == 0 => { int_end = i + 1; }
+                        '0'..='9' => { int_end = i + 1; }
+                        _ => break,
+                    }
+                }
+                if int_end > 0 { Some((int_end, "LITERAL_INTEGER")) } else { None }
+            } else {
+                None
+            }
+        } else {
+            if self.literal_options.enable_integer { Some((end, "LITERAL_INTEGER")) } else { None }
+        }
+    }
+
+    /// Attempts to match string literals using configured delimiter and escape handling.
+    fn match_string_literal(&self, text: &str) -> Option<(usize, &'static str)> {
+        let chars: Vec<char> = text.chars().collect();
+        let delimiter = self.literal_options.string_delimiter;
+
+        if chars.is_empty() || chars[0] != delimiter {
+            return None;
+        }
+
+        #[derive(Debug, Clone, Copy)]
+        enum StringState { InString { escaped: bool } }
+
         let mut end = 1; // Start after the opening quote
-        let mut escaped = false;
+        let mut state = StringState::InString { escaped: false };
 
         for &ch in &chars[1..] {
             end += 1;
-
-            if escaped {
-                escaped = false;
-                continue;
-            }
-
-            match ch {
-                '\\' => escaped = true,
-                '"' => return Some((end, "LITERAL_STRING")),
-                _ => continue,
+            match state {
+                StringState::InString { escaped: true } => {
+                    // Previous was backslash; current is escaped if allowed
+                    state = StringState::InString { escaped: false };
+                }
+                StringState::InString { escaped: false } => {
+                    if self.literal_options.allow_string_escape && ch == '\\' {
+                        state = StringState::InString { escaped: true };
+                    } else if ch == delimiter {
+                        return Some((end, "LITERAL_STRING"));
+                    }
+                }
             }
         }
 
-        None // Unclosed string
+        None
+    }
+
+    /// Attempts to match character literals (e.g., 'a', '\n').
+    fn match_char_literal(&self, text: &str) -> Option<(usize, &'static str)> {
+        let mut it = text.chars();
+        let Some(first) = it.next() else { return None };
+        if first != '\'' { return None }
+
+        let Some(next) = it.next() else { return None };
+        let mut consumed = 2usize;
+        if next == '\\' {
+            if !self.literal_options.char_allow_escape { return None }
+            let Some(_) = it.next() else { return None };
+            consumed += 1;
+        }
+        let Some(close) = it.next() else { return None };
+        if close != '\'' { return None }
+        consumed += 1;
+        Some((consumed, "LITERAL_CHAR"))
     }
 
     /// Returns all token types that match at the given position.
@@ -611,5 +753,52 @@ mod tests {
         assert!(tokens_found.iter().any(|(_, _, t)| *t == "KEYWORD_LET"));
         assert!(tokens_found.iter().any(|(_, _, t)| *t == "OP_ASSIGN"));
         assert!(tokens_found.iter().any(|(_, _, t)| *t == "LITERAL_INTEGER"));
+    }
+
+    #[test]
+    fn character_literal_recognition() {
+        let generator = TokenGenerator::new().enable_character_literals(true);
+        let tokens = vec![TokenDefinition::new("=", "OP_ASSIGN", TokenCategory::Operator)];
+        let tokenizer = generator.generate_tokenizer(tokens);
+
+        let cases = ["'a'", "'\\n'", "'\\''"];
+        for s in cases {
+            if let Some((end, token)) = tokenizer.match_with_precedence(s, 0) {
+                assert_eq!(token, "LITERAL_CHAR");
+                assert_eq!(end, s.len());
+            } else {
+                panic!("expected char literal match for: {}", s);
+            }
+        }
+    }
+
+    #[test]
+    fn string_delimiter_customization() {
+        let generator = TokenGenerator::new()
+            .with_string_delimiter('\'')
+            .enable_character_literals(false);
+        let tokenizer = generator.generate_tokenizer(vec![]);
+
+        let s = "'hello world'";
+        if let Some((end, token)) = tokenizer.match_with_precedence(s, 0) {
+            assert_eq!(token, "LITERAL_STRING");
+            assert_eq!(end, s.len());
+        } else {
+            panic!("expected single-quoted string literal");
+        }
+    }
+
+    #[test]
+    fn disable_scientific_notation() {
+        let generator = TokenGenerator::new().allow_scientific_notation(false);
+        let tokenizer = generator.generate_tokenizer(vec![]);
+
+        let s = "1e5";
+        if let Some((end, token)) = tokenizer.match_with_precedence(s, 0) {
+            assert_eq!(token, "LITERAL_INTEGER");
+            assert_eq!(end, 1);
+        } else {
+            panic!("expected integer prefix match when scientific disabled");
+        }
     }
 }
