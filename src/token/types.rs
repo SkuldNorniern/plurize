@@ -11,6 +11,14 @@ pub enum TokenCategory {
     Symbol,
     /// Literals like "true", "false", "null"
     Literal,
+    /// Integer numbers like "42", "0", "-10"
+    Integer,
+    /// Floating point numbers like "3.14", "-0.5", "1e10"
+    Float,
+    /// String literals like "hello", "world"
+    String,
+    /// Character literals like 'a', '1', '\n'
+    Character,
     /// Custom category for user-defined tokens
     Custom(&'static str),
 }
@@ -22,6 +30,10 @@ impl TokenCategory {
             TokenCategory::Operator => 1,
             TokenCategory::Symbol => 2,
             TokenCategory::Literal => 3,
+            TokenCategory::Integer => 3,
+            TokenCategory::Float => 3,
+            TokenCategory::String => 3,
+            TokenCategory::Character => 3,
             TokenCategory::Custom(_) => 4,
         }
     }
@@ -127,6 +139,19 @@ mod tests {
     }
 
     #[test]
+    fn literal_category_precedence() {
+        // All literal types should have the same precedence
+        assert_eq!(TokenCategory::Literal.precedence(), TokenCategory::Integer.precedence());
+        assert_eq!(TokenCategory::Integer.precedence(), TokenCategory::Float.precedence());
+        assert_eq!(TokenCategory::Float.precedence(), TokenCategory::String.precedence());
+        assert_eq!(TokenCategory::String.precedence(), TokenCategory::Character.precedence());
+
+        // Literals should have lower precedence than symbols (higher precedence number)
+        assert!(TokenCategory::Symbol.has_precedence_over(&TokenCategory::Integer));
+        assert!(TokenCategory::Integer.has_precedence_over(&TokenCategory::Custom("test")));
+    }
+
+    #[test]
     fn custom_token_category() {
         let custom_category = TokenCategory::Custom("MY_CUSTOM");
         assert_eq!(custom_category.precedence(), 4);
@@ -139,5 +164,20 @@ mod tests {
 
         // But literals have higher precedence than custom categories
         assert!(TokenCategory::Literal.has_precedence_over(&custom_category));
+    }
+
+    #[test]
+    fn new_literal_categories() {
+        // Test that all new literal categories exist and have correct precedence
+        assert_eq!(TokenCategory::Integer.precedence(), 3);
+        assert_eq!(TokenCategory::Float.precedence(), 3);
+        assert_eq!(TokenCategory::String.precedence(), 3);
+        assert_eq!(TokenCategory::Character.precedence(), 3);
+
+        // All literal types should have the same precedence
+        assert_eq!(TokenCategory::Integer.precedence(), TokenCategory::Float.precedence());
+        assert_eq!(TokenCategory::Float.precedence(), TokenCategory::String.precedence());
+        assert_eq!(TokenCategory::String.precedence(), TokenCategory::Character.precedence());
+        assert_eq!(TokenCategory::Character.precedence(), TokenCategory::Literal.precedence());
     }
 }

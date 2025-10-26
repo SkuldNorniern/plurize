@@ -62,6 +62,34 @@ impl TokenGenerator {
 
         tokenizer
     }
+
+    /// Generates a tokenizer with common literal support (numbers, strings, etc.).
+    ///
+    /// # Arguments
+    /// * `base_tokens` - Vector of base token definitions to include
+    ///
+    /// # Returns
+    /// A `Tokenizer` instance configured with base tokens and literal recognition
+    pub fn generate_tokenizer_with_literals(&self, base_tokens: Vec<TokenDefinition>) -> Tokenizer {
+        let mut all_tokens = base_tokens;
+        all_tokens.extend(self.get_common_literals());
+        self.generate_tokenizer(all_tokens)
+    }
+
+    /// Returns common literal token definitions for numbers, strings, and other literals.
+    fn get_common_literals(&self) -> Vec<TokenDefinition> {
+        vec![
+            // Integer patterns (common ones that might be used as keywords or special values)
+            TokenDefinition::new("0", "LITERAL_INTEGER", TokenCategory::Integer),
+            TokenDefinition::new("1", "LITERAL_INTEGER", TokenCategory::Integer),
+
+            // String delimiters
+            TokenDefinition::new("\"", "STRING_DELIMITER", TokenCategory::Symbol),
+
+            // Character delimiters
+            TokenDefinition::new("'", "CHAR_DELIMITER", TokenCategory::Symbol),
+        ]
+    }
 }
 
 /// A tokenizer generated from token definitions.
@@ -103,7 +131,8 @@ impl Tokenizer {
 
     /// Matches any token starting at the given position, considering precedence rules.
     ///
-    /// This method applies category-based precedence when multiple tokens could match.
+    /// This method applies category-based precedence when multiple tokens could match,
+    /// and also attempts to recognize literals like numbers and strings.
     ///
     /// # Arguments
     /// * `text` - The source text to scan
@@ -113,17 +142,140 @@ impl Tokenizer {
     /// * `Some((end_pos, token_type))` if a match is found
     /// * `None` if no token matches at the given position
     pub fn match_with_precedence(&self, text: &str, start: usize) -> Option<(usize, &str)> {
+        // First try exact matches from the trie
         if let Some((end, token_type)) = self.match_longest_from(text, start) {
             return Some((end, token_type));
         }
 
+        // Then try category-based matches
         for trie in self.category_tries.values() {
             if let Some((end, token_type)) = trie.match_longest_from(text, start) {
                 return Some((end, token_type.as_str()));
             }
         }
 
+        // Finally try literal recognition
+        self.match_literal(text, start)
+    }
+
+    /// Attempts to match literals (numbers, strings, etc.) at the given position.
+    ///
+    /// # Arguments
+    /// * `text` - The source text to scan
+    /// * `start` - The starting position in the text
+    ///
+    /// # Returns
+    /// * `Some((end_pos, token_type))` if a literal is found
+    /// * `None` if no literal matches at the given position
+    fn match_literal(&self, text: &str, start: usize) -> Option<(usize, &'static str)> {
+        if text.len() <= start {
+            return None;
+        }
+
+        let remaining = &text[start..];
+
+        // Try to match numbers first
+        if let Some((end, literal_type)) = self.match_number_literal(remaining) {
+            return Some((start + end, literal_type));
+        }
+
+        // Try to match string literals
+        if let Some((end, literal_type)) = self.match_string_literal(remaining) {
+            return Some((start + end, literal_type));
+        }
+
         None
+    }
+
+    /// Attempts to match number literals (integers and floats).
+    fn match_number_literal(&self, text: &str) -> Option<(usize, &'static str)> {
+        let mut end = 0;
+        let chars: Vec<char> = text.chars().collect();
+        let mut has_dot = false;
+        let mut has_exp = false;
+
+        for (i, &ch) in chars.iter().enumerate() {
+            match ch {
+                '0'..='9' => {
+                    let mut num_end = i + 1;
+                    // Consume remaining consecutive digits
+                    while num_end < chars.len() && chars[num_end].is_ascii_digit() {
+                        num_end += 1;
+                    }
+                    end = num_end;
+                }
+                '-' if i == 0 => {
+                    end = i + 1;
+                }
+                '.' if !has_dot && i > 0 && i + 1 < chars.len() && chars[i + 1].is_ascii_digit() => {
+                    has_dot = true;
+                    let mut decimal_end = i + 2;
+                    // Consume remaining digits after decimal
+                    while decimal_end < chars.len() && chars[decimal_end].is_ascii_digit() {
+                        decimal_end += 1;
+                    }
+                    end = decimal_end;
+                }
+                'e' | 'E' if !has_exp && i > 0 && i + 1 < chars.len() => {
+                    has_exp = true;
+                    // Handle optional sign and digits
+                    let mut exp_pos = i + 1;
+                    if chars[i + 1] == '+' || chars[i + 1] == '-' {
+                        if i + 2 >= chars.len() || !chars[i + 2].is_ascii_digit() {
+                            break; // Invalid: sign without digit
+                        }
+                        exp_pos = i + 2;
+                    } else if !chars[i + 1].is_ascii_digit() {
+                        break; // Invalid: no digit after e
+                    }
+
+                    // Consume remaining digits
+                    while exp_pos < chars.len() && chars[exp_pos].is_ascii_digit() {
+                        exp_pos += 1;
+                    }
+
+                    end = exp_pos;
+                }
+                _ => break,
+            }
+        }
+
+        if end > 0 {
+            // Determine if it's a float or integer
+            let literal_type = if has_dot || has_exp { "LITERAL_FLOAT" } else { "LITERAL_INTEGER" };
+            Some((end, literal_type))
+        } else {
+            None
+        }
+    }
+
+    /// Attempts to match string literals (double-quoted strings).
+    fn match_string_literal(&self, text: &str) -> Option<(usize, &'static str)> {
+        let chars: Vec<char> = text.chars().collect();
+
+        if chars.is_empty() || chars[0] != '"' {
+            return None;
+        }
+
+        let mut end = 1; // Start after the opening quote
+        let mut escaped = false;
+
+        for &ch in &chars[1..] {
+            end += 1;
+
+            if escaped {
+                escaped = false;
+                continue;
+            }
+
+            match ch {
+                '\\' => escaped = true,
+                '"' => return Some((end, "LITERAL_STRING")),
+                _ => continue,
+            }
+        }
+
+        None // Unclosed string
     }
 
     /// Returns all token types that match at the given position.
@@ -148,6 +300,11 @@ impl Tokenizer {
             if let Some((end, token_type)) = trie.match_longest_from(text, start) {
                 matches.push((end, token_type.clone()));
             }
+        }
+
+        // Check literal matches
+        if let Some((end, token_type)) = self.match_literal(text, start) {
+            matches.push((end, token_type.to_string()));
         }
 
         matches
@@ -353,5 +510,106 @@ mod tests {
         let match_types: Vec<&str> = matches.iter().map(|(_, t)| t.as_str()).collect();
         assert!(match_types.contains(&"KEYWORD_LET"));
         assert!(match_types.contains(&"IDENTIFIER"));
+    }
+
+    #[test]
+    fn literal_number_recognition() {
+        let generator = TokenGenerator::new();
+        let tokens = vec![
+            TokenDefinition::new("let", "KEYWORD_LET", TokenCategory::Keyword),
+            TokenDefinition::new("=", "OP_ASSIGN", TokenCategory::Operator),
+        ];
+
+        let tokenizer = generator.generate_tokenizer(tokens);
+
+        // Test integer recognition
+        let test_cases = [
+            ("42", (0, "LITERAL_INTEGER")),
+            ("-10", (0, "LITERAL_INTEGER")),
+            ("0", (0, "LITERAL_INTEGER")),
+            ("3.14", (0, "LITERAL_FLOAT")),
+            ("-0.5", (0, "LITERAL_FLOAT")),
+            ("1e10", (0, "LITERAL_FLOAT")),
+            ("2.5e-3", (0, "LITERAL_FLOAT")),
+        ];
+
+        for (text, (start_pos, expected_token)) in test_cases {
+            if let Some((end, token)) = tokenizer.match_with_precedence(text, start_pos) {
+                assert_eq!(token, expected_token, "Failed for text: {}", text);
+                assert_eq!(end, text.len(), "Should consume entire number: {}", text);
+            } else {
+                panic!("Expected literal match for text: {} at position {}", text, start_pos);
+            }
+        }
+    }
+
+    #[test]
+    fn literal_string_recognition() {
+        let generator = TokenGenerator::new();
+        let tokens = vec![
+            TokenDefinition::new("print", "KEYWORD_PRINT", TokenCategory::Keyword),
+        ];
+
+        let tokenizer = generator.generate_tokenizer(tokens);
+
+        // Test string recognition
+        let test_cases = [
+            ("\"hello\"", (0, "LITERAL_STRING")),
+            ("\"world\"", (0, "LITERAL_STRING")),
+            ("\"hello world\"", (0, "LITERAL_STRING")),
+            ("\"with\\\"quotes\"", (0, "LITERAL_STRING")),
+        ];
+
+        for (text, (start_pos, expected_token)) in test_cases {
+            if let Some((end, token)) = tokenizer.match_with_precedence(text, start_pos) {
+                assert_eq!(token, expected_token, "Failed for text: {}", text);
+                assert_eq!(end, text.len(), "Should consume entire string: {}", text);
+            } else {
+                panic!("Expected string literal match for text: {} at position {}", text, start_pos);
+            }
+        }
+    }
+
+    #[test]
+    fn tokenizer_with_literals() {
+        let generator = TokenGenerator::new();
+        let base_tokens = vec![
+            TokenDefinition::new("let", "KEYWORD_LET", TokenCategory::Keyword),
+            TokenDefinition::new("=", "OP_ASSIGN", TokenCategory::Operator),
+        ];
+
+        let mut all_tokens = base_tokens.clone();
+        all_tokens.push(TokenDefinition::new("42", "LITERAL_INTEGER", TokenCategory::Integer));
+        let tokenizer = generator.generate_tokenizer(all_tokens);
+
+        // Should have both base tokens and literal support
+        let code = "let x = 42";
+        let mut pos = 0;
+        let mut tokens_found = Vec::new();
+
+        while pos < code.len() {
+            if let Some((end, token_type)) = tokenizer.match_with_precedence(code, pos) {
+                tokens_found.push((pos, end, token_type));
+                pos = end;
+            } else {
+                // Skip whitespace or single characters
+                if let Some(ch) = code.chars().nth(pos) {
+                    if ch.is_whitespace() {
+                        pos += ch.len_utf8();
+                    } else {
+                        // Skip single characters that don't match
+                        pos += ch.len_utf8();
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // Should find: let, x (skipped), =, 42 (as literal)
+        assert!(!tokens_found.is_empty());
+        assert!(tokens_found.iter().any(|(_, _, t)| *t == "KEYWORD_LET"));
+        assert!(tokens_found.iter().any(|(_, _, t)| *t == "OP_ASSIGN"));
+        assert!(tokens_found.iter().any(|(_, _, t)| *t == "LITERAL_INTEGER"));
     }
 }
